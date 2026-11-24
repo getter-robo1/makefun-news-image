@@ -1,554 +1,440 @@
 #!/usr/bin/env python3
-"""news-image-20261124: draw one 1024x1024 front-page image summing up the
-world news of Tuesday 24 November 2026 and write it to /output/entry.png.
+"""THE WORLD TODAY - Tuesday 24 November 2026.
 
-Pure Python 3 standard library only (os, sys, zlib, struct): no network, no
-randomness, no timestamps, no third-party packages, so the grader's two runs
-write byte-identical PNGs. All news is baked in as constants below.
+Pure Python 3 standard library. Draws a 1024x1024 newspaper front page
+summing up the day's world news and writes it to entry.png.
 
-Rendering is done by hand: a small RGB canvas, a few drawing primitives, and
-a 5x7 bitmap font scaled up for headlines and body text.
+No network, no randomness, no timestamps: two runs write identical bytes.
+The output directory comes from MAKEFUN_OUTPUT_DIR, default /output.
 """
 
+import math
 import os
 import struct
-import sys
 import zlib
 
 W = 1024
 H = 1024
 
-# --------------------------------------------------------------------------
-# 5x7 bitmap font (printable ASCII 32..126). Each glyph is 7 rows of 5 bits,
-# written as strings of '0' (off) and '1' (on), top row first.
-# --------------------------------------------------------------------------
+PAPER = (246, 241, 231)
+PANEL = (238, 231, 216)
+INK = (20, 20, 20)
+GREY = (112, 106, 94)
+RED = (176, 32, 32)
+ORANGE = (198, 98, 16)
+BLUE = (28, 68, 120)
+TEAL = (14, 110, 104)
+YELLOW = (255, 200, 60)
+WHITE = (255, 255, 255)
+BLACK = (12, 12, 12)
+
+
+# ---------------------------------------------------------------- canvas
+
+def set_px(buf, x, y, c):
+    if 0 <= x < W and 0 <= y < H:
+        i = (y * W + x) * 3
+        buf[i], buf[i + 1], buf[i + 2] = c
+
+
+def fill_rect(buf, x, y, w, h, c):
+    x0 = max(0, x)
+    y0 = max(0, y)
+    x1 = min(W, x + w)
+    y1 = min(H, y + h)
+    if x1 <= x0 or y1 <= y0:
+        return
+    row = bytes(c) * (x1 - x0)
+    for yy in range(y0, y1):
+        s = (yy * W + x0) * 3
+        buf[s:s + len(row)] = row
+
+
+def hline(buf, x, y, w, c, t=1):
+    fill_rect(buf, x, y, w, t, c)
+
+
+def vline(buf, x, y, h, c, t=1):
+    fill_rect(buf, x, y, t, h, c)
+
+
+def line(buf, x0, y0, x1, y1, c):
+    """Bresenham line."""
+    dx = abs(x1 - x0)
+    sx = 1 if x0 < x1 else -1
+    dy = -abs(y1 - y0)
+    sy = 1 if y0 < y1 else -1
+    err = dx + dy
+    while True:
+        set_px(buf, x0, y0, c)
+        if x0 == x1 and y0 == y1:
+            break
+        e2 = 2 * err
+        if e2 >= dy:
+            err += dy
+            x0 += sx
+        if e2 <= dx:
+            err += dx
+            y0 += sy
+
+
+def circle_outline(buf, cx, cy, r, c):
+    """Midpoint circle outline."""
+    x = 0
+    y = r
+    d = 3 - 2 * r
+    while y >= x:
+        for px, py in ((cx + x, cy + y), (cx - x, cy + y),
+                       (cx + x, cy - y), (cx - x, cy - y),
+                       (cx + y, cy + x), (cx - y, cy + x),
+                       (cx + y, cy - x), (cx - y, cy - x)):
+            set_px(buf, px, py, c)
+        x += 1
+        if d > 0:
+            y -= 1
+            d = d + 4 * (x - y) + 10
+        else:
+            d = d + 4 * x + 6
+
+
+def disc(buf, cx, cy, r, c):
+    """Filled circle."""
+    for dy in range(-r, r + 1):
+        dx = int(math.sqrt(r * r - dy * dy))
+        hline(buf, cx - dx, cy + dy, 2 * dx + 1, c)
+
+
+def ellipse(buf, cx, cy, rx, ry, c):
+    """Thin ellipse outline, sampled parametrically."""
+    for deg in range(0, 360, 2):
+        a = math.radians(deg)
+        set_px(buf, cx + int(rx * math.cos(a)), cy + int(ry * math.sin(a)), c)
+
+
+def polyline(buf, pts, c):
+    for a, b in zip(pts, pts[1:]):
+        line(buf, a[0], a[1], b[0], b[1], c)
+
+
+# ---------------------------------------------------------------- font
+# A 5x7 bitmap font, drawn by hand: '#' is ink, '.' is blank.
+# Seven rows per glyph, five columns each.
+
 FONT = {
-    ' ': ("00000", "00000", "00000", "00000", "00000", "00000", "00000"),
-    '!': ("00100", "00100", "00100", "00100", "00100", "00000", "00100"),
-    '"': ("01010", "01010", "01010", "00000", "00000", "00000", "00000"),
-    '#': ("01010", "01010", "11111", "01010", "11111", "01010", "01010"),
-    '$': ("00100", "01111", "10101", "01110", "00101", "01111", "00100"),
-    '%': ("11001", "11010", "00010", "00100", "01000", "01011", "10011"),
-    '&': ("01110", "10001", "10010", "01010", "10101", "10010", "01011"),
-    "'": ("00100", "00100", "01000", "00000", "00000", "00000", "00000"),
-    '(': ("00010", "00100", "01000", "01000", "01000", "00100", "00010"),
-    ')': ("01000", "00100", "00010", "00010", "00010", "00100", "01000"),
-    '*': ("00000", "01010", "01110", "11111", "01110", "01010", "00000"),
-    '+': ("00000", "00100", "00100", "11111", "00100", "00100", "00000"),
-    ',': ("00000", "00000", "00000", "00000", "00100", "00100", "01000"),
-    '-': ("00000", "00000", "00000", "11111", "00000", "00000", "00000"),
-    '.': ("00000", "00000", "00000", "00000", "00000", "00000", "00100"),
-    '/': ("00001", "00010", "00010", "00100", "01000", "01000", "10000"),
-    '0': ("01110", "10001", "10011", "10101", "11001", "10001", "01110"),
-    '1': ("00100", "01100", "00100", "00100", "00100", "00100", "01110"),
-    '2': ("01110", "10001", "00001", "00010", "00100", "01000", "11111"),
-    '3': ("11110", "00001", "00001", "01110", "00001", "00001", "11110"),
-    '4': ("00010", "00110", "01010", "10001", "11111", "00010", "00010"),
-    '5': ("11111", "10000", "11110", "00001", "00001", "10001", "01110"),
-    '6': ("01110", "10000", "10000", "11110", "10001", "10001", "01110"),
-    '7': ("11111", "00001", "00010", "00010", "00100", "00100", "00100"),
-    '8': ("01110", "10001", "10001", "01110", "10001", "10001", "01110"),
-    '9': ("01110", "10001", "10001", "01111", "00001", "00001", "01110"),
-    ':': ("00000", "00100", "00000", "00000", "00000", "00100", "00000"),
-    ';': ("00000", "00100", "00000", "00000", "00100", "00100", "01000"),
-    '<': ("00010", "00100", "01000", "10000", "01000", "00100", "00010"),
-    '=': ("00000", "00000", "11111", "00000", "11111", "00000", "00000"),
-    '>': ("01000", "00100", "00010", "00001", "00010", "00100", "01000"),
-    '?': ("01110", "10001", "00001", "00010", "00100", "00000", "00100"),
-    '@': ("01110", "10001", "10111", "10101", "10101", "10010", "01110"),
-    'A': ("01110", "10001", "10001", "11111", "10001", "10001", "10001"),
-    'B': ("11110", "10001", "10001", "11110", "10001", "10001", "11110"),
-    'C': ("01110", "10001", "10000", "10000", "10000", "10001", "01110"),
-    'D': ("11100", "10010", "10001", "10001", "10001", "10010", "11100"),
-    'E': ("11111", "10000", "10000", "11110", "10000", "10000", "11111"),
-    'F': ("11111", "10000", "10000", "11110", "10000", "10000", "10000"),
-    'G': ("01110", "10001", "10000", "10111", "10001", "10001", "01110"),
-    'H': ("10001", "10001", "10001", "11111", "10001", "10001", "10001"),
-    'I': ("01110", "00100", "00100", "00100", "00100", "00100", "01110"),
-    'J': ("00111", "00010", "00010", "00010", "00010", "10010", "01100"),
-    'K': ("10001", "10010", "10100", "11000", "10100", "10010", "10001"),
-    'L': ("10000", "10000", "10000", "10000", "10000", "10000", "11111"),
-    'M': ("10001", "11011", "10101", "10101", "10001", "10001", "10001"),
-    'N': ("10001", "11001", "11001", "10101", "10011", "10011", "10001"),
-    'O': ("01110", "10001", "10001", "10001", "10001", "10001", "01110"),
-    'P': ("11110", "10001", "10001", "11110", "10000", "10000", "10000"),
-    'Q': ("01110", "10001", "10001", "10001", "10101", "10010", "01101"),
-    'R': ("11110", "10001", "10001", "11110", "10100", "10010", "10001"),
-    'S': ("01111", "10000", "10000", "01110", "00001", "00001", "11110"),
-    'T': ("11111", "00100", "00100", "00100", "00100", "00100", "00100"),
-    'U': ("10001", "10001", "10001", "10001", "10001", "10001", "01110"),
-    'V': ("10001", "10001", "10001", "10001", "10001", "01010", "00100"),
-    'W': ("10001", "10001", "10001", "10101", "10101", "11011", "10001"),
-    'X': ("10001", "10001", "01010", "00100", "01010", "10001", "10001"),
-    'Y': ("10001", "10001", "01010", "00100", "00100", "00100", "00100"),
-    'Z': ("11111", "00001", "00010", "00100", "01000", "10000", "11111"),
-    '[': ("01110", "01000", "01000", "01000", "01000", "01000", "01110"),
-    '\\': ("10000", "10000", "01000", "01000", "00100", "00100", "00010"),
-    ']': ("01110", "00010", "00010", "00010", "00010", "00010", "01110"),
-    '^': ("00100", "01010", "00000", "00000", "00000", "00000", "00000"),
-    '_': ("00000", "00000", "00000", "00000", "00000", "00000", "11111"),
-    '`': ("01000", "01000", "00100", "00000", "00000", "00000", "00000"),
-    'a': ("00000", "00000", "01111", "00001", "01111", "10001", "01111"),
-    'b': ("10000", "10000", "11110", "10001", "10001", "10001", "11110"),
-    'c': ("00000", "00000", "01110", "10001", "10000", "10001", "01110"),
-    'd': ("00001", "00001", "01111", "10001", "10001", "10001", "01111"),
-    'e': ("00000", "00000", "01110", "10001", "11111", "10000", "01110"),
-    'f': ("00110", "01001", "01000", "01110", "01000", "01000", "01000"),
-    'g': ("00000", "01111", "10001", "10001", "01111", "00001", "01110"),
-    'h': ("10000", "10000", "11110", "10001", "10001", "10001", "10001"),
-    'i': ("00100", "00000", "01100", "00100", "00100", "00100", "01110"),
-    'j': ("00010", "00000", "00110", "00010", "00010", "00010", "01100"),
-    'k': ("10000", "10000", "10010", "10100", "11000", "10100", "10010"),
-    'l': ("01100", "00100", "00100", "00100", "00100", "00100", "01110"),
-    'm': ("00000", "00000", "11010", "10101", "10101", "10101", "10101"),
-    'n': ("00000", "00000", "11110", "10001", "10001", "10001", "10001"),
-    'o': ("00000", "00000", "01110", "10001", "10001", "10001", "01110"),
-    'p': ("00000", "00000", "11110", "10001", "10001", "11110", "10000"),
-    'q': ("00000", "00000", "01111", "10001", "10001", "01111", "00001"),
-    'r': ("00000", "00000", "10110", "11001", "10000", "10000", "10000"),
-    's': ("00000", "00000", "01111", "10000", "01110", "00001", "11110"),
-    't': ("01000", "01000", "01110", "01000", "01000", "01000", "00110"),
-    'u': ("00000", "00000", "10001", "10001", "10001", "10011", "01101"),
-    'v': ("00000", "00000", "10001", "10001", "10001", "01010", "00100"),
-    'w': ("00000", "00000", "10001", "10001", "10101", "10101", "01010"),
-    'x': ("00000", "00000", "10001", "01010", "00100", "01010", "10001"),
-    'y': ("00000", "00000", "10001", "10001", "01111", "00001", "01110"),
-    'z': ("00000", "00000", "11111", "00010", "00100", "01000", "11111"),
-    '{': ("00011", "00100", "00100", "01100", "00100", "00100", "00011"),
-    '|': ("00100", "00100", "00100", "00100", "00100", "00100", "00100"),
-    '}': ("11000", "00100", "00100", "00110", "00100", "00100", "11000"),
-    '~': ("00000", "00000", "01101", "10101", "00000", "00000", "00000"),
+    'A': (".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"),
+    'B': ("####.", "#...#", "#...#", "####.", "#...#", "#...#", "####."),
+    'C': (".####", "#....", "#....", "#....", "#....", "#....", ".####"),
+    'D': ("####.", "#...#", "#...#", "#...#", "#...#", "#...#", "####."),
+    'E': ("#####", "#....", "#....", "####.", "#....", "#....", "#####"),
+    'F': ("#####", "#....", "#....", "####.", "#....", "#....", "#...."),
+    'G': (".####", "#....", "#....", "#.###", "#...#", "#...#", ".###."),
+    'H': ("#...#", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"),
+    'I': ("#####", "..#..", "..#..", "..#..", "..#..", "..#..", "#####"),
+    'J': ("..###", "...#.", "...#.", "...#.", "...#.", "#..#.", ".##.."),
+    'K': ("#...#", "#..#.", "#.#..", "##...", "#.#..", "#..#.", "#...#"),
+    'L': ("#....", "#....", "#....", "#....", "#....", "#....", "#####"),
+    'M': ("#...#", "##.##", "#.#.#", "#.#.#", "#...#", "#...#", "#...#"),
+    'N': ("#...#", "##..#", "#.#.#", "#..##", "#...#", "#...#", "#...#"),
+    'O': (".###.", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."),
+    'P': ("####.", "#...#", "#...#", "####.", "#....", "#....", "#...."),
+    'Q': (".###.", "#...#", "#...#", "#...#", "#.#.#", "#..#.", ".##.#"),
+    'R': ("####.", "#...#", "#...#", "####.", "#.#..", "#..#.", "#...#"),
+    'S': (".####", "#....", "#....", ".###.", "....#", "....#", "####."),
+    'T': ("#####", "..#..", "..#..", "..#..", "..#..", "..#..", "..#.."),
+    'U': ("#...#", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."),
+    'V': ("#...#", "#...#", "#...#", "#...#", "#...#", ".#.#.", "..#.."),
+    'W': ("#...#", "#...#", "#...#", "#.#.#", "#.#.#", "##.##", "#...#"),
+    'X': ("#...#", "#...#", ".#.#.", "..#..", ".#.#.", "#...#", "#...#"),
+    'Y': ("#...#", "#...#", ".#.#.", "..#..", "..#..", "..#..", "..#.."),
+    'Z': ("#####", "....#", "...#.", "..#..", ".#...", "#....", "#####"),
+    'a': (".....", ".....", ".###.", "....#", ".####", "#...#", ".###."),
+    'b': ("#....", "#....", "####.", "#...#", "#...#", "#...#", "####."),
+    'c': (".....", ".....", ".####", "#....", "#....", "#....", ".####"),
+    'd': ("....#", "....#", ".####", "#...#", "#...#", "#...#", ".####"),
+    'e': (".....", ".....", ".###.", "#...#", "#####", "#....", ".###."),
+    'f': ("..##.", ".#..#", ".#...", "####.", ".#...", ".#...", ".#..."),
+    'g': (".....", ".####", "#...#", "#...#", ".####", "....#", ".###."),
+    'h': ("#....", "#....", "####.", "#...#", "#...#", "#...#", "#...#"),
+    'i': ("..#..", ".....", ".##..", "..#..", "..#..", "..#..", ".###."),
+    'j': ("...#.", ".....", "..##.", "...#.", "...#.", "...#.", ".##.."),
+    'k': ("#....", "#....", "#..#.", "#.#..", "##...", "#.#..", "#..#."),
+    'l': (".##..", "..#..", "..#..", "..#..", "..#..", "..#..", ".###."),
+    'm': (".....", ".....", "##.#.", "#.#.#", "#.#.#", "#.#.#", "#.#.#"),
+    'n': (".....", ".....", "####.", "#...#", "#...#", "#...#", "#...#"),
+    'o': (".....", ".....", ".###.", "#...#", "#...#", "#...#", ".###."),
+    'p': (".....", ".....", "####.", "#...#", "#...#", "####.", "#...."),
+    'q': (".....", ".....", ".####", "#...#", "#...#", ".####", "....#"),
+    'r': (".....", ".....", "#.##.", "##..#", "#....", "#....", "#...."),
+    's': (".....", ".....", ".####", "#....", ".###.", "....#", "####."),
+    't': (".#...", ".#...", "####.", ".#...", ".#...", ".#...", "..##."),
+    'u': (".....", ".....", "#...#", "#...#", "#...#", "#..##", ".##.#"),
+    'v': (".....", ".....", "#...#", "#...#", "#...#", ".#.#.", "..#.."),
+    'w': (".....", ".....", "#...#", "#.#.#", "#.#.#", "#.#.#", ".#.#."),
+    'x': (".....", ".....", "#...#", ".#.#.", "..#..", ".#.#.", "#...#"),
+    'y': (".....", ".....", "#...#", "#...#", ".####", "....#", ".###."),
+    'z': (".....", ".....", "#####", "...#.", "..#..", ".#...", "#####"),
+    '0': (".###.", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."),
+    '1': ("..#..", ".##..", "..#..", "..#..", "..#..", "..#..", ".###."),
+    '2': (".###.", "#...#", "....#", "...#.", "..#..", ".#...", "#####"),
+    '3': ("####.", "....#", "....#", ".###.", "....#", "....#", "####."),
+    '4': ("...#.", "..##.", ".#.#.", "#..#.", "#####", "...#.", "...#."),
+    '5': ("#####", "#....", "####.", "....#", "....#", "#...#", ".###."),
+    '6': (".###.", "#....", "#....", "####.", "#...#", "#...#", ".###."),
+    '7': ("#####", "....#", "...#.", "..#..", "..#..", "..#..", "..#.."),
+    '8': (".###.", "#...#", "#...#", ".###.", "#...#", "#...#", ".###."),
+    '9': (".###.", "#...#", "#...#", ".####", "....#", "....#", ".###."),
+    ' ': (".....", ".....", ".....", ".....", ".....", ".....", "....."),
+    '.': (".....", ".....", ".....", ".....", ".....", ".##..", ".##.."),
+    ',': (".....", ".....", ".....", ".....", ".##..", ".##..", ".#..."),
+    "'": ("..#..", "..#..", ".#...", ".....", ".....", ".....", "....."),
+    ':': (".....", ".##..", ".##..", ".....", ".##..", ".##..", "....."),
+    ';': (".....", ".##..", ".##..", ".....", ".##..", ".##..", ".#..."),
+    '!': ("..#..", "..#..", "..#..", "..#..", "..#..", ".....", "..#.."),
+    '?': (".###.", "#...#", "....#", "...#.", "..#..", ".....", "..#.."),
+    '-': (".....", ".....", ".....", ".###.", ".....", ".....", "....."),
+    '$': ("..#..", ".####", "#.#..", ".###.", "..#.#", "####.", "..#.."),
+    '%': ("##..#", "##.#.", "...#.", "..#..", ".#...", "#.##.", "#..##"),
+    '(': ("...#.", "..#..", ".#...", ".#...", ".#...", "..#..", "...#."),
+    ')': (".#...", "..#..", "...#.", "...#.", "...#.", "..#..", ".#..."),
+    '/': ("....#", "....#", "...#.", "..#..", ".#...", "#....", "#...."),
+    '&': (".##..", "#..#.", "#..#.", ".#...", "#.#.#", "#..#.", ".##.#"),
+    '"': (".#.#.", ".#.#.", ".#.#.", ".....", ".....", ".....", "....."),
+    '+': (".....", "..#..", "..#..", ".###.", "..#..", "..#..", "....."),
+    '=': (".....", ".....", ".###.", ".....", ".###.", ".....", "....."),
+    '*': (".....", ".#.#.", ".###.", "#####", ".###.", ".#.#.", "....."),
 }
 
 
-# --------------------------------------------------------------------------
-# Minimal PNG writer (truecolour RGB, filter 0, one IDAT chunk, no ancillary
-# chunks, so output is fully deterministic).
-# --------------------------------------------------------------------------
-def _chunk(kind, data):
-    out = struct.pack(">I", len(data)) + kind + data
-    out += struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
-    return out
+def text_w(s, sc):
+    return len(s) * 6 * sc
 
 
-def write_png(path, buf, w, h):
-    raw = bytearray()
-    stride = w * 3
-    for y in range(h):
-        raw.append(0)  # filter: None
-        raw += buf[y * stride:(y + 1) * stride]
-    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
-    png = b"\x89PNG\r\n\x1a\n"
-    png += _chunk(b"IHDR", ihdr)
-    png += _chunk(b"IDAT", zlib.compress(bytes(raw), 6))
-    png += _chunk(b"IEND", b"")
-    with open(path, "wb") as f:
-        f.write(png)
-
-
-# --------------------------------------------------------------------------
-# Canvas: an RGB bytearray with simple drawing primitives.
-# --------------------------------------------------------------------------
-class Canvas:
-    def __init__(self, w, h, bg):
-        self.w = w
-        self.h = h
-        self.buf = bytearray(w * h * 3)
-        self.fill_rect(0, 0, w, h, bg)
-
-    def _px(self, x, y, color):
-        if 0 <= x < self.w and 0 <= y < self.h:
-            i = (y * self.w + x) * 3
-            self.buf[i] = color[0]
-            self.buf[i + 1] = color[1]
-            self.buf[i + 2] = color[2]
-
-    def fill_rect(self, x, y, w, h, color):
-        x0 = max(0, x)
-        y0 = max(0, y)
-        x1 = min(self.w, x + w)
-        y1 = min(self.h, y + h)
-        if x1 <= x0 or y1 <= y0:
-            return
-        row = bytes(color) * (x1 - x0)
-        for yy in range(y0, y1):
-            i = (yy * self.w + x0) * 3
-            self.buf[i:i + (x1 - x0) * 3] = row
-
-    def rect(self, x, y, w, h, color, t=1):
-        self.fill_rect(x, y, w, t, color)
-        self.fill_rect(x, y + h - t, w, t, color)
-        self.fill_rect(x, y, t, h, color)
-        self.fill_rect(x + w - t, y, t, h, color)
-
-    def hline(self, x, y, w, color, t=1):
-        self.fill_rect(x, y, w, t, color)
-
-    def vline(self, x, y, h, color, t=1):
-        self.fill_rect(x, y, t, h, color)
-
-    def line(self, x0, y0, x1, y1, color, t=1):
-        # Bresenham, with a square brush of size t for thickness.
-        dx = abs(x1 - x0)
-        dy = -abs(y1 - y0)
-        sx = 1 if x0 < x1 else -1
-        sy = 1 if y0 < y1 else -1
-        err = dx + dy
-        while True:
-            self.fill_rect(x0 - t // 2, y0 - t // 2, t, t, color)
-            if x0 == x1 and y0 == y1:
-                break
-            e2 = 2 * err
-            if e2 >= dy:
-                err += dy
-                x0 += sx
-            if e2 <= dx:
-                err += dx
-                y0 += sy
-
-    def circle(self, cx, cy, r, color, fill=True):
-        # Midpoint circle; filled by scanlines when fill=True.
-        x = 0
-        y = r
-        d = 1 - r
-        pts = []
-        while x <= y:
-            pts.append((x, y))
-            if d < 0:
-                d += 2 * x + 3
-            else:
-                d += 2 * (x - y) + 5
-                y -= 1
-            x += 1
-        if fill:
-            for px, py in pts:
-                self.fill_rect(cx - px, cy - py, 2 * px + 1, 1, color)
-                self.fill_rect(cx - px, cy + py, 2 * px + 1, 1, color)
-                self.fill_rect(cx - py, cy - px, 2 * py + 1, 1, color)
-                self.fill_rect(cx - py, cy + px, 2 * py + 1, 1, color)
-        else:
-            for px, py in pts:
-                for sx, sy in ((px, py), (py, px), (-px, py), (-py, px),
-                               (px, -py), (py, -px), (-px, -py), (-py, -px)):
-                    self._px(cx + sx, cy + sy, color)
-
-    def ellipse(self, cx, cy, rx, ry, color, fill=True):
-        # Filled ellipse by scanlines (or outline by sampling the rim).
-        if fill:
-            for dy in range(-ry, ry + 1):
-                half = int(rx * (1 - (dy * dy) / float(ry * ry)) ** 0.5)
-                self.fill_rect(cx - half, cy + dy, 2 * half + 1, 1, color)
-        else:
-            import math
-            for deg in range(0, 360, 2):
-                a = math.radians(deg)
-                self._px(int(cx + rx * math.cos(a)), int(cy + ry * math.sin(a)), color)
-
-    def triangle(self, pts, color):
-        # Filled triangle by scanline rasterisation.
-        (x0, y0), (x1, y1), (x2, y2) = pts
-        ymin = max(0, min(y0, y1, y2))
-        ymax = min(self.h - 1, max(y0, y1, y2))
-        for y in range(ymin, ymax + 1):
-            xs = []
-            for (ax, ay), (bx, by) in (((x0, y0), (x1, y1)),
-                                       ((x1, y1), (x2, y2)),
-                                       ((x2, y2), (x0, y0))):
-                if ay == by:
-                    continue
-                if min(ay, by) <= y < max(ay, by):
-                    xs.append(ax + (y - ay) * (bx - ax) / (by - ay))
-            if len(xs) >= 2:
-                xa, xb = int(min(xs)), int(max(xs))
-                self.fill_rect(xa, y, xb - xa + 1, 1, color)
-
-
-# --------------------------------------------------------------------------
-# Text: the 5x7 font drawn at integer scale. Character advance is 6*scale
-# (5 pixels of glyph + 1 pixel of tracking); line height is 9*scale.
-# --------------------------------------------------------------------------
-def text_width(text, scale):
-    return len(text) * 6 * scale - scale
-
-
-def draw_text(cv, x, y, text, scale, color):
+def draw_text(buf, x, y, s, sc, color):
     cx = x
-    for ch in text:
-        glyph = FONT.get(ch, FONT[" "])
-        for row in range(7):
-            bits = glyph[row]
-            for col in range(5):
-                if bits[col] == "1":
-                    cv.fill_rect(cx + col * scale, y + row * scale,
-                                 scale, scale, color)
-        cx += 6 * scale
-    return cx
+    for ch in s:
+        g = FONT.get(ch, FONT[' '])
+        for r in range(7):
+            row = g[r]
+            for c in range(5):
+                if row[c] == '#':
+                    fill_rect(buf, cx + c * sc, y + r * sc, sc, sc, color)
+        cx += 6 * sc
+    return cx - x
 
 
-def draw_text_centered(cv, cx, y, text, scale, color):
-    draw_text(cv, cx - text_width(text, scale) // 2, y, text, scale, color)
+def draw_centered(buf, y, s, sc, color):
+    draw_text(buf, (W - text_w(s, sc)) // 2, y, s, sc, color)
 
 
-def draw_text_right(cv, x, y, text, scale, color):
-    draw_text(cv, x - text_width(text, scale), y, text, scale, color)
-
-
-def wrap_text(text, scale, max_w):
-    """Greedy word wrap; returns a list of lines fitting max_w pixels."""
-    max_chars = max(1, (max_w + scale) // (6 * scale))
-    words = text.split(" ")
+def wrap_text(s, sc, max_w):
     lines = []
-    cur = ""
-    for word in words:
-        trial = word if not cur else cur + " " + word
-        if len(trial) <= max_chars:
+    cur = ''
+    for word in s.split(' '):
+        trial = (cur + ' ' + word).strip()
+        if text_w(trial, sc) <= max_w:
             cur = trial
         else:
             if cur:
                 lines.append(cur)
-            # A single over-long word is hard-split.
-            while len(word) > max_chars:
-                lines.append(word[:max_chars])
-                word = word[max_chars:]
             cur = word
     if cur:
         lines.append(cur)
     return lines
 
 
-def draw_para(cv, x, y, text, scale, color, max_w, leading=None):
-    """Draw a wrapped paragraph; returns the y just below the last line."""
-    lh = leading if leading is not None else 9 * scale
-    for line in wrap_text(text, scale, max_w):
-        draw_text(cv, x, y, line, scale, color)
-        y += lh
+def draw_block(buf, x, y, s, sc, max_w, color, leading=None):
+    if leading is None:
+        leading = 9 * sc
+    for ln in wrap_text(s, sc, max_w):
+        draw_text(buf, x, y, ln, sc, color)
+        y += leading
     return y
 
 
-# --------------------------------------------------------------------------
-# Small pictogram icons, drawn with the same primitives.
-# --------------------------------------------------------------------------
-def icon_globe(cv, x, y, s, ink, red):
-    # A globe: circle, meridians, equator, and a red crack across it.
-    r = s // 2
-    cx, cy = x + r, y + r
-    cv.circle(cx, cy, r, ink, fill=False)
-    cv.ellipse(cx, cy, r // 2, r, ink, fill=False)
-    cv.ellipse(cx, cy, r, r // 3, ink, fill=False)
-    cv.hline(x, cy, s, ink, 2)
-    # A jagged crack across the globe (one broken line, not an X).
-    crack = [(x + s // 4, y + s // 6),
-             (x + 2 * s // 5, y + s // 3),
-             (x + s // 3, y + s // 2),
-             (x + 11 * s // 20, y + 3 * s // 5),
-             (x + s // 2, y + 4 * s // 5),
-             (x + 2 * s // 3, y + 11 * s // 12)]
-    for (ax, ay), (bx, by) in zip(crack, crack[1:]):
-        cv.line(ax, ay, bx, by, red, 5)
+# ---------------------------------------------------------------- icons
+
+def globe(buf, cx, cy, r):
+    """Wireframe globe with a red crack: the climate story."""
+    circle_outline(buf, cx, cy, r, INK)
+    ellipse(buf, cx, cy, r, r // 3, INK)
+    ellipse(buf, cx, cy, r // 3, r, INK)
+    hline(buf, cx - r, cy, 2 * r + 1, INK)
+    crack = [(cx + 4, cy - r + 8), (cx + 18, cy - r + 34),
+             (cx - 6, cy - r + 62), (cx + 16, cy - r + 92),
+             (cx - 8, cy - r + 120), (cx + 10, cy - r + 148),
+             (cx - 2, cy + r - 10)]
+    polyline(buf, crack, RED)
+    # thicken the crack by redrawing it shifted by one pixel
+    shifted = [(px + 1, py) for px, py in crack]
+    polyline(buf, shifted, RED)
 
 
-def icon_ship(cv, x, y, s, ink, blue):
-    # A cargo ship on waves.
-    cv.fill_rect(x + s // 6, y + s // 3, 2 * s // 3, s // 6, ink)
-    cv.triangle([(x + s // 6, y + s // 2), (x + 5 * s // 6, y + s // 2),
-                 (x + 3 * s // 4, y + 2 * s // 3)], ink)
-    cv.fill_rect(x + s // 2 - 2, y + s // 8, 4, s // 4, ink)
-    cv.fill_rect(x + s // 2, y + s // 8, s // 5, s // 10, blue)
-    for i, wy in enumerate((y + 3 * s // 4, y + 5 * s // 6)):
-        cv.hline(x + i * s // 8, wy, s - i * s // 4, blue, 3)
+def ship(buf, x, y):
+    """Small cargo ship: the Hormuz story."""
+    fill_rect(buf, x + 2, y + 16, 36, 8, BLUE)
+    line(buf, x + 2, y + 16, x + 8, y + 24, BLUE)
+    line(buf, x + 38, y + 16, x + 32, y + 24, BLUE)
+    vline(buf, x + 20, y + 2, 14, INK, 2)
+    fill_rect(buf, x + 22, y + 2, 10, 6, RED)
+    hline(buf, x, y + 27, 44, TEAL, 2)
+    hline(buf, x + 8, y + 31, 28, TEAL, 2)
 
 
-def icon_shield(cv, x, y, s, ink, blue):
-    # A shield with Estonia's blue-black-white bars.
-    w = 3 * s // 4
-    h = s
-    x0 = x + (s - w) // 2
-    cv.fill_rect(x0, y, w, h // 3, blue)
-    cv.fill_rect(x0, y + h // 3, w, h // 3, ink)
-    cv.fill_rect(x0, y + 2 * h // 3, w, h // 3, (245, 245, 245))
-    cv.rect(x0, y, w, h, ink, 3)
-    cv.triangle([(x0 + w // 2 - 6, y + h - 2), (x0 + w // 2 + 6, y + h - 2),
-                 (x0 + w // 2, y + h + s // 6)], ink)
+def estonia_flag(buf, x, y):
+    """Estonian blue-black-white tricolour on a pole."""
+    vline(buf, x, y, 32, INK, 2)
+    fill_rect(buf, x + 3, y, 38, 8, BLUE)
+    fill_rect(buf, x + 3, y + 8, 38, 8, BLACK)
+    fill_rect(buf, x + 3, y + 16, 38, 8, WHITE)
+    hline(buf, x + 3, y, 38, INK)
+    hline(buf, x + 3, y + 23, 38, INK)
+    vline(buf, x + 40, y, 24, INK)
+    vline(buf, x + 3, y, 24, INK)
 
 
-def icon_flame(cv, x, y, s, orange, red):
-    # A flame: two stacked teardrops.
-    cx = x + s // 2
-    cv.circle(cx, y + 2 * s // 3, s // 4, orange, fill=True)
-    cv.triangle([(cx - s // 4, y + 2 * s // 3), (cx + s // 4, y + 2 * s // 3),
-                 (cx, y + s // 6)], orange)
-    cv.circle(cx, y + 3 * s // 4, s // 7, red, fill=True)
-    cv.triangle([(cx - s // 7, y + 3 * s // 4), (cx + s // 7, y + 3 * s // 4),
-                 (cx, y + s // 2)], red)
+def flame(buf, x, y):
+    """Small flame: the Banten fire."""
+    cx = x + 18
+    disc(buf, cx, y + 18, 12, ORANGE)
+    disc(buf, cx, y + 20, 7, RED)
+    disc(buf, cx, y + 22, 3, YELLOW)
+    line(buf, cx - 10, y + 10, cx, y - 4, ORANGE)
+    line(buf, cx + 10, y + 10, cx, y - 4, ORANGE)
 
 
-def icon_train(cv, x, y, s, ink, teal):
-    # A train front on tracks.
-    w = 2 * s // 3
-    x0 = x + (s - w) // 2
-    cv.fill_rect(x0, y + s // 6, w, s // 2, teal)
-    cv.fill_rect(x0 + w // 8, y + s // 4, w // 4, s // 6, (251, 247, 238))
-    cv.fill_rect(x0 + 5 * w // 8, y + s // 4, w // 4, s // 6, (251, 247, 238))
-    cv.fill_rect(x0, y + s // 2, w, s // 12, ink)
-    cv.circle(x0 + w // 4, y + 2 * s // 3, s // 14, ink, fill=True)
-    cv.circle(x0 + 3 * w // 4, y + 2 * s // 3, s // 14, ink, fill=True)
-    cv.hline(x, y + 5 * s // 6, s, ink, 3)
+def train(buf, x, y):
+    """Small train: the Nepal rail link."""
+    fill_rect(buf, x + 2, y, 32, 6, TEAL)
+    fill_rect(buf, x, y + 4, 36, 18, TEAL)
+    fill_rect(buf, x + 6, y + 8, 8, 6, WHITE)
+    fill_rect(buf, x + 22, y + 8, 8, 6, WHITE)
+    disc(buf, x + 10, y + 26, 4, INK)
+    disc(buf, x + 26, y + 26, 4, INK)
+    hline(buf, x, y + 30, 40, INK, 2)
 
 
-def icon_burst(cv, x, y, s, ink, red):
-    # An explosion starburst.
-    cx, cy = x + s // 2, y + s // 2
-    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1),
-                   (1, 1), (-1, -1), (1, -1), (-1, 1)):
-        cv.line(cx, cy, cx + dx * s // 2, cy + dy * s // 2, ink, 4)
-    cv.circle(cx, cy, s // 6, red, fill=True)
-    cv.circle(cx, cy, s // 12, (251, 247, 238), fill=True)
+def burst(buf, cx, cy, r):
+    """Starburst: strikes and explosions for the Kyiv strip."""
+    for k in range(12):
+        a = math.pi * k / 6
+        x1 = cx + int(r * math.cos(a))
+        y1 = cy + int(r * math.sin(a))
+        line(buf, cx, cy, x1, y1, WHITE)
+    disc(buf, cx, cy, 8, RED)
+    disc(buf, cx, cy, 3, WHITE)
 
 
-# --------------------------------------------------------------------------
-# Palette.
-# --------------------------------------------------------------------------
-PAPER = (251, 247, 238)
-INK = (22, 19, 14)
-RED = (166, 25, 46)
-BLUE = (31, 78, 121)
-TEAL = (20, 82, 74)
-GRAY = (107, 101, 90)
-LIGHT = (233, 226, 211)
-ORANGE = (204, 102, 0)
+# ---------------------------------------------------------------- layout
 
-MX = 36            # side margin
-RX = W - MX        # right edge of the content column (988)
-CW = RX - MX       # content width (952)
-
-# --------------------------------------------------------------------------
-# The day's news, baked in. Every fact below was reported in the world press
-# on 23-24 November 2026; wording is kept to what was reported, no hype.
-# --------------------------------------------------------------------------
-LEAD = {
-    "kicker": "CLIMATE - COP31 - ANTALYA",
-    "head1": "COP31 COLLAPSES",
-    "head2": "NO FOSSIL-FUEL DEAL",
-    "body": ("After two weeks in Antalya, 194 nations reject the draft "
-             "Antalya Pact. It never mentions fossil fuels, so the EU and "
-             "island states refuse it."),
-}
-
-SECONDARY = [
-    {
-        "kicker": "STRAIT OF HORMUZ",
-        "head": ["25 SEAFARERS", "KILLED AT SEA"],
-        "body": "UN counts 25 killed around the Strait of Hormuz since February.",
-        "accent": BLUE,
-        "icon": "ship",
-    },
-    {
-        "kicker": "ESTONIA - RUSSIA",
-        "head": ["RUSSIA WARNS OF", "'OPEN WAR'"],
-        "body": "Moscow warns Tallinn over its six-month border closure.",
-        "accent": RED,
-        "icon": "shield",
-    },
-    {
-        "kicker": "BANTEN, INDONESIA",
-        "head": ["FIRE KILLS 24", "IN BANTEN"],
-        "body": "Candy factory blaze; about 30 still missing.",
-        "accent": ORANGE,
-        "icon": "flame",
-    },
-    {
-        "kicker": "INDIA - NEPAL",
-        "head": ["INDIA PLEDGES", "$1.6BN TO NEPAL"],
-        "body": "Aid after floods, plus a new Saryu-Kamala Express rail link.",
-        "accent": TEAL,
-        "icon": "train",
-    },
-]
-
-KYIV_HEAD = "KYIV HIT; SHIP BURNS AT SEA"
-KYIV_BODY = ("Russian drones hit the Kyiv region; cargo ship Sparta II "
-             "burns in the Gulf of Finland.")
-
-ALSO_2 = "BEPICOLOMBO ENTERS MERCURY ORBIT  -  CHESS WORLD CHAMPIONSHIP OPENS IN GENEVA"
-
-FOOTER = "Compiled from world news reports of 24 November 2026."
+MARGIN = 30
+CW = W - 2 * MARGIN  # 964
 
 
-def draw_icon(cv, kind, x, y, s, ink):
-    if kind == "ship":
-        icon_ship(cv, x, y, s, ink, BLUE)
-    elif kind == "shield":
-        icon_shield(cv, x, y, s, ink, BLUE)
-    elif kind == "flame":
-        icon_flame(cv, x, y, s, ORANGE, RED)
-    elif kind == "train":
-        icon_train(cv, x, y, s, ink, TEAL)
+def draw_page(buf):
+    # --- masthead
+    hline(buf, MARGIN, 26, CW, INK, 5)
+    draw_centered(buf, 40, "THE WORLD TODAY", 9, INK)
+    draw_centered(buf, 116, "TUESDAY, 24 NOVEMBER 2026", 3, INK)
+    hline(buf, MARGIN, 126, 228, INK, 2)
+    hline(buf, W - MARGIN - 228, 126, 228, INK, 2)
+    hline(buf, MARGIN, 150, CW, RED, 4)
+
+    # --- lead story: COP31
+    globe(buf, 125, 280, 88)
+    draw_text(buf, 240, 176, "CLIMATE - COP31 - ANTALYA", 2, RED)
+    draw_text(buf, 240, 204, "COP31 COLLAPSES", 6, INK)
+    draw_text(buf, 240, 252, "NO FOSSIL-FUEL DEAL", 6, INK)
+    draw_block(buf, 240, 312,
+               "Climate talks in Antalya, Turkiye end in deadlock. "
+               "194 nations reject the draft pact, which never mentions "
+               "fossil fuels, so the EU and island states refuse to sign it.",
+               2, 754, INK, 20)
+    hline(buf, MARGIN, 398, CW, INK, 2)
+
+    # --- four secondary stories, 2 x 2 grid
+    col_w = 468
+    row1_y = 414
+    row2_y = 580
+    vline(buf, 511, row1_y, 316, GREY, 2)
+    hline(buf, MARGIN, 566, CW, GREY, 2)
+
+    def cell(x, y, bar, kicker, head1, head2, body, icon):
+        fill_rect(buf, x, y, 6, 138, bar)
+        draw_text(buf, x + 16, y, kicker, 2, RED)
+        draw_text(buf, x + 16, y + 28, head1, 3, INK)
+        draw_text(buf, x + 16, y + 53, head2, 3, INK)
+        draw_block(buf, x + 16, y + 86, body, 2, col_w - 16, INK, 20)
+        icon(buf, x + col_w - 48, y)
+
+    cell(MARGIN, row1_y, BLUE, "STRAIT OF HORMUZ",
+         "25 SEAFARERS", "KILLED AT SEA",
+         "UN counts 25 seafarers killed in attacks around the strait, "
+         "a vital oil shipping lane.", ship)
+    cell(526, row1_y, RED, "ESTONIA - RUSSIA",
+         "RUSSIA WARNS OF", "'OPEN WAR'",
+         "Moscow warns of open war if Estonia closes its border "
+         "as planned.", estonia_flag)
+    cell(MARGIN, row2_y, ORANGE, "BANTEN, INDONESIA",
+         "FACTORY FIRE", "KILLS 24",
+         "A candy factory fire kills 24 people, with around 30 "
+         "more missing.", flame)
+    cell(526, row2_y, TEAL, "INDIA - NEPAL",
+         "INDIA PLEDGES", "$1.6BN TO NEPAL",
+         "India pledges $1.6 billion in aid after floods, plus a "
+         "new rail link.", train)
+
+    # --- dark strip: Kyiv + Sparta II
+    fill_rect(buf, MARGIN, 748, CW, 110, BLACK)
+    burst(buf, 78, 803, 26)
+    draw_text(buf, 122, 768, "KYIV HIT AS SHIP BURNS AT SEA", 3, WHITE)
+    draw_block(buf, 122, 806,
+               "Russian strikes hit the Kyiv region, and cargo ship "
+               "Sparta II burns in the Gulf of Finland.",
+               2, 856, WHITE, 20)
+
+    # --- footer: also today
+    draw_text(buf, MARGIN, 890, "ALSO TODAY - ", 2, RED)
+    draw_text(buf, MARGIN + text_w("ALSO TODAY - ", 2), 890,
+              "VERSTAPPEN WINS LAS VEGAS GP - ALCARAZ WINS MAIDEN ATP FINALS",
+              2, INK)
+    draw_text(buf, MARGIN, 916, "BEPICOLOMBO ENTERS MERCURY ORBIT", 2, INK)
+    draw_text(buf, MARGIN, 942,
+              "WORLD CHESS CHAMPIONSHIP OPENS IN GENEVA - GUKESH VS SINDAROV",
+              2, INK)
+    draw_centered(buf, 968,
+                  "Compiled from world news reports of 24 November 2026.",
+                  2, GREY)
 
 
-def draw_cell(cv, x, y, w, h, story):
-    cv.fill_rect(x, y, 6, h, story["accent"])
-    cv.fill_rect(x + 6, y, w - 6, h, LIGHT)
-    ix = x + w - 52
-    draw_icon(cv, story["icon"], ix, y + 10, 44, INK)
-    draw_text(cv, x + 20, y + 12, story["kicker"], 2, RED)
-    draw_text(cv, x + 20, y + 38, story["head"][0], 4, INK)
-    draw_text(cv, x + 20, y + 74, story["head"][1], 4, INK)
-    draw_para(cv, x + 20, y + 114, story["body"], 3, INK, w - 40, leading=25)
+# ---------------------------------------------------------------- PNG
+
+def _chunk(kind, data):
+    out = struct.pack('>I', len(data)) + kind + data
+    out += struct.pack('>I', zlib.crc32(kind + data) & 0xffffffff)
+    return out
 
 
-def draw_page():
-    cv = Canvas(W, H, PAPER)
-
-    # ---- Masthead ----
-    cv.fill_rect(MX, 26, CW, 4, INK)
-    draw_text_centered(cv, W // 2, 40, "THE WORLD TODAY", 9, INK)
-    draw_text_centered(cv, W // 2, 112, "TUESDAY, 24 NOVEMBER 2026", 4, INK)
-    cv.fill_rect(MX, 150, CW, 4, RED)
-
-    # ---- Lead story: COP31 ----
-    icon_globe(cv, MX, 176, 180, INK, RED)
-    tx = MX + 204
-    draw_text(cv, tx, 176, LEAD["kicker"], 3, RED)
-    draw_text(cv, tx, 206, LEAD["head1"], 7, INK)
-    draw_text(cv, tx, 262, LEAD["head2"], 5, INK)
-    draw_para(cv, tx, 308, LEAD["body"], 3, INK, RX - tx, leading=27)
-
-    # ---- Divider ----
-    cv.fill_rect(MX, 434, CW, 2, INK)
-
-    # ---- Secondary grid: 2 x 2 ----
-    cell_w = 460
-    cell_h = 190
-    positions = [(MX, 448), (MX + 492, 448), (MX, 652), (MX + 492, 652)]
-    for pos, story in zip(positions, SECONDARY):
-        draw_cell(cv, pos[0], pos[1], cell_w, cell_h, story)
-
-    # ---- Kyiv strip ----
-    sy = 852
-    cv.fill_rect(MX, sy, CW, 104, LIGHT)
-    cv.rect(MX, sy, CW, 104, INK, 2)
-    icon_burst(cv, MX + 20, sy + 22, 60, INK, RED)
-    draw_text(cv, MX + 104, sy + 14, KYIV_HEAD, 4, INK)
-    draw_para(cv, MX + 104, sy + 50, KYIV_BODY, 3, INK,
-              RX - (MX + 104) - 16, leading=26)
-
-    # ---- Also today (red label, ink items) ----
-    ax = draw_text(cv, MX, 966, "ALSO TODAY", 2, RED)
-    draw_text(cv, ax, 966, "  -  VERSTAPPEN WINS LAS VEGAS GP  -  ALCARAZ WINS ATP FINALS", 2, INK)
-    draw_text(cv, MX, 984, ALSO_2, 2, INK)
-
-    # ---- Footer ----
-    draw_text_centered(cv, W // 2, 1006, FOOTER, 2, GRAY)
-
-    return cv
+def write_png(path, buf, w, h):
+    raw = bytearray()
+    stride = w * 3
+    for yy in range(h):
+        raw.append(0)
+        raw += buf[yy * stride:(yy + 1) * stride]
+    png = b'\x89PNG\r\n\x1a\n'
+    png += _chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0))
+    png += _chunk(b'IDAT', zlib.compress(bytes(raw), 9))
+    png += _chunk(b'IEND', b'')
+    with open(path, 'wb') as f:
+        f.write(png)
 
 
 def main():
-    out_dir = os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
+    buf = bytearray(bytes(PAPER) * (W * H))
+    draw_page(buf)
+    out_dir = os.environ.get('MAKEFUN_OUTPUT_DIR') or '/output'
     os.makedirs(out_dir, exist_ok=True)
-    page = draw_page()
-    write_png(os.path.join(out_dir, "entry.png"), page.buf, W, H)
+    write_png(os.path.join(out_dir, 'entry.png'), buf, W, H)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
